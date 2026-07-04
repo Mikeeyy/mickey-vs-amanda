@@ -143,7 +143,14 @@ const CODE_PREFIX = 'mvsa-';     // namespace on the shared public broker
 //   };
 //
 // Leave it null to run in same-network-only mode.
-const TURN = null;
+const TURN = {
+  urls: [
+    'turn:free.expressturn.com:3478',
+    'turn:free.expressturn.com:3478?transport=tcp',
+  ],
+  username: '000000002098493947',
+  credential: 'C273rNmNtGZkRyt6NymQz2/15Ik=',
+};
 
 const PEER_CONFIG = {
   config: {
