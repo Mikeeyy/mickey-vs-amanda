@@ -376,6 +376,7 @@ function pointerToBoard(e) {
 }
 
 function onPointer(e) {
+  if (e.cancelable) e.preventDefault();   // stop scroll/zoom stealing the drag on mobile
   if (!running) return;
   const p = pointerToBoard(e);
   const pad = isHost ? hostPaddle : guestPaddle;
@@ -385,8 +386,8 @@ function onPointer(e) {
   else        pad.ty = clamp(p.y, PADDLE_R, H / 2 - PADDLE_R);
 }
 
-canvas.addEventListener('pointermove', onPointer);
-canvas.addEventListener('pointerdown', onPointer);
+canvas.addEventListener('pointermove', onPointer, { passive: false });
+canvas.addEventListener('pointerdown', onPointer, { passive: false });
 
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
@@ -403,8 +404,8 @@ function loop(now) {
 
 // -------- HOST: authoritative simulation --------
 function hostStep(now) {
-  movePaddle(hostPaddle);
-  movePaddle(guestPaddle);
+  movePaddle(hostPaddle, 1);      // my paddle — track input directly (no lag)
+  movePaddle(guestPaddle, 0.5);   // opponent — smooth the networked target
 
   if (countdown > 0) {
     countdown--;
@@ -432,19 +433,22 @@ function hostStep(now) {
 
 // -------- GUEST: send paddle, wait for snapshots --------
 function guestStep(now) {
-  movePaddle(guestPaddle);      // local smoothing for our own paddle
+  movePaddle(guestPaddle, 1);   // my paddle — track input directly (no lag)
   if (conn && conn.open && now - lastSend > NET_RATE) {
     lastSend = now;
     conn.send({ t: 'paddle', x: guestPaddle.tx, y: guestPaddle.ty });
   }
 }
 
-// Ease a paddle toward its target and remember previous pos for velocity.
-function movePaddle(pad) {
+// Move a paddle toward its target and remember previous pos for velocity.
+// smooth = 1 tracks the target exactly (use for YOUR OWN paddle so it sticks
+// to your finger/cursor with zero lag); smooth < 1 eases (use for the
+// opponent's networked paddle to hide packet jitter).
+function movePaddle(pad, smooth) {
   pad.px = pad.x;
   pad.py = pad.y;
-  pad.x += (pad.tx - pad.x) * 0.5;
-  pad.y += (pad.ty - pad.y) * 0.5;
+  pad.x += (pad.tx - pad.x) * smooth;
+  pad.y += (pad.ty - pad.y) * smooth;
 }
 
 function stepPuck() {
