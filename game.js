@@ -129,38 +129,37 @@ const CODE_PREFIX = 'mvsa-';     // namespace on the shared public broker
 // cross-device on Pages hung at "waiting". These public TURN servers relay
 // the traffic when a direct P2P link can't be punched through.
 // ---------------------------------------------------------------------------
-// TURN relay credentials.  STUN (below) is enough when both players are on
-// the same network; two devices on DIFFERENT networks (or a Wi‑Fi with client
-// isolation) need a TURN relay to connect at all. There is no longer any
-// reliable free *no-signup* public TURN server — they are all dead — so to
-// enable cross-internet play, paste real credentials from a free provider
-// here (e.g. ExpressTurn or Metered — both have instant free tiers):
-//
-//   const TURN = {
-//     urls: ['turn:relay1.expressturn.com:3480', 'turns:relay1.expressturn.com:5349'],
-//     username: 'ef_XXXXXXXX',
-//     credential: 'YYYYYYYY',
-//   };
-//
-// Leave it null to run in same-network-only mode.
-const TURN = {
-  urls: [
-    'turn:free.expressturn.com:3478',
-    'turn:free.expressturn.com:3478?transport=tcp',
-  ],
-  username: '000000002098493947',
-  credential: 'C273rNmNtGZkRyt6NymQz2/15Ik=',
-};
+// ICE servers.  STUN alone connects two players on the same network; two
+// devices on DIFFERENT networks (phone on mobile data ↔ laptop on Wi‑Fi, or a
+// Wi‑Fi with client isolation) need a TURN relay. There is no reliable free
+// *no-signup* public TURN server anymore, so we fetch fresh credentials at
+// page load from Metered's free TURN service. This auto-refreshes every visit,
+// so the credentials never expire and nothing needs rotating.
+const METERED_TURN_URL =
+  'https://mikeeyy.metered.live/api/v1/turn/credentials?apiKey=fe86cec8b746a24d88fda95f77718f00a2b1';
 
-const PEER_CONFIG = {
-  config: {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      ...(TURN ? [TURN] : []),
-    ],
-  },
-};
+// Google STUN as a baseline fallback if the Metered fetch ever fails.
+let iceServers = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+];
+
+// Kick off the credential fetch immediately; connect handlers await it.
+const iceReady = fetch(METERED_TURN_URL)
+  .then((r) => r.json())
+  .then((list) => {
+    if (Array.isArray(list) && list.length) {
+      iceServers = list;
+      console.log('[mvsa] TURN credentials loaded (' + list.length + ' ICE servers)');
+    }
+    return iceServers;
+  })
+  .catch((err) => {
+    console.warn('[mvsa] TURN fetch failed — falling back to STUN only:', err);
+    return iceServers;
+  });
+
+function peerConfig() { return { config: { iceServers } }; }
 
 let peer = null;
 let conn = null;
@@ -175,13 +174,14 @@ function randomCode() {
   return c;
 }
 
-function createGame() {
+async function createGame() {
   isHost = true;
   const code = randomCode();
   $('btn-create').disabled = true;
   menuStatus('Connecting to game network…');
 
-  peer = new Peer(CODE_PREFIX + code, PEER_CONFIG);
+  await iceReady;                 // ensure TURN credentials are loaded first
+  peer = new Peer(CODE_PREFIX + code, peerConfig());
 
   peer.on('open', (id) => {
     console.log('[mvsa] host peer registered as', id);
@@ -208,11 +208,13 @@ function createGame() {
   });
 }
 
-function joinGame() {
+async function joinGame() {
   isHost = false;
   const code = joinInput.value;
   $('btn-join').disabled = true;
   menuStatus('Connecting…');
+
+  await iceReady;                 // ensure TURN credentials are loaded first
 
   // Watchdog: if we can't establish the link (bad code, or a network even
   // TURN can't traverse), tell the user instead of spinning forever.
@@ -222,7 +224,7 @@ function joinGame() {
     if (peer) peer.destroy();
   }, 20000);
 
-  peer = new Peer(PEER_CONFIG);
+  peer = new Peer(peerConfig());
   peer.on('open', (id) => {
     console.log('[mvsa] guest peer registered as', id, '— dialing', CODE_PREFIX + code);
     conn = peer.connect(CODE_PREFIX + code, { reliable: false });
