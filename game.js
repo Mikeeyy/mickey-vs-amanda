@@ -128,14 +128,29 @@ const CODE_PREFIX = 'mvsa-';     // namespace on the shared public broker
 // need a TURN relay to connect at all — that's why localhost worked but
 // cross-device on Pages hung at "waiting". These public TURN servers relay
 // the traffic when a direct P2P link can't be punched through.
+// ---------------------------------------------------------------------------
+// TURN relay credentials.  STUN (below) is enough when both players are on
+// the same network; two devices on DIFFERENT networks (or a Wi‑Fi with client
+// isolation) need a TURN relay to connect at all. There is no longer any
+// reliable free *no-signup* public TURN server — they are all dead — so to
+// enable cross-internet play, paste real credentials from a free provider
+// here (e.g. ExpressTurn or Metered — both have instant free tiers):
+//
+//   const TURN = {
+//     urls: ['turn:relay1.expressturn.com:3480', 'turns:relay1.expressturn.com:5349'],
+//     username: 'ef_XXXXXXXX',
+//     credential: 'YYYYYYYY',
+//   };
+//
+// Leave it null to run in same-network-only mode.
+const TURN = null;
+
 const PEER_CONFIG = {
   config: {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'turn:openrelay.metered.ca:80',                 username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.ca:443',                username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.ca:443?transport=tcp',  username: 'openrelayproject', credential: 'openrelayproject' },
+      ...(TURN ? [TURN] : []),
     ],
   },
 };
@@ -161,17 +176,20 @@ function createGame() {
 
   peer = new Peer(CODE_PREFIX + code, PEER_CONFIG);
 
-  peer.on('open', () => {
+  peer.on('open', (id) => {
+    console.log('[mvsa] host peer registered as', id);
     $('room-code').textContent = code;
     show('lobby');
   });
 
   peer.on('connection', (c) => {
+    console.log('[mvsa] guest is connecting…');
     conn = c;
     setupConn();
   });
 
   peer.on('error', (err) => {
+    console.error('[mvsa] host peer error:', err.type, err);
     if (err.type === 'unavailable-id') {
       // Rare code collision on the public broker — just try again.
       peer.destroy();
@@ -198,26 +216,62 @@ function joinGame() {
   }, 20000);
 
   peer = new Peer(PEER_CONFIG);
-  peer.on('open', () => {
+  peer.on('open', (id) => {
+    console.log('[mvsa] guest peer registered as', id, '— dialing', CODE_PREFIX + code);
     conn = peer.connect(CODE_PREFIX + code, { reliable: false });
     setupConn();
   });
   peer.on('error', (err) => {
-    menuStatus('Could not connect (' + err.type + '). Check the code.', true);
+    console.error('[mvsa] guest peer error:', err.type, err);
+    clearTimeout(connectTimer);
+    const msg = err.type === 'peer-unavailable'
+      ? 'No game found with that code. Make sure the other player created it and the code is exact.'
+      : 'Could not connect (' + err.type + ').';
+    menuStatus(msg, true);
     $('btn-join').disabled = false;
   });
 }
 
 // Common connection setup for both roles.
 function setupConn() {
+  attachDiag(conn);
   conn.on('open', () => {
     clearTimeout(connectTimer);
+    console.log('[mvsa] data channel OPEN');
     // Announce which character we are.
     conn.send({ t: 'hello', char: myChar });
   });
   conn.on('data', onData);
   conn.on('close', onDisconnect);
-  conn.on('error', onDisconnect);
+  conn.on('error', (e) => { console.error('[mvsa] conn error', e); onDisconnect(); });
+}
+
+// Watch the underlying RTCPeerConnection so failures are visible instead of
+// a silent timeout. Open the browser console (F12) to see the ICE trace.
+function attachDiag(c) {
+  const tryAttach = () => {
+    const pc = c.peerConnection;
+    if (!pc) { setTimeout(tryAttach, 300); return; }
+    pc.addEventListener('iceconnectionstatechange', () => {
+      const s = pc.iceConnectionState;
+      console.log('[mvsa] ICE state:', s);
+      if (!isHost && !running) {
+        if (s === 'checking')  menuStatus('Player found — establishing connection…');
+        if (s === 'connected' || s === 'completed') menuStatus('Connected!');
+        if (s === 'failed') {
+          menuStatus('Connection failed: your networks block direct P2P and the relay could not help. Try both devices on the same Wi‑Fi.', true);
+          $('btn-join').disabled = false;
+        }
+      }
+    });
+    pc.addEventListener('icecandidate', (e) => {
+      if (e.candidate) console.log('[mvsa] local candidate:', e.candidate.type, e.candidate.protocol, e.candidate.address || '');
+    });
+    pc.addEventListener('icecandidateerror', (e) => {
+      console.warn('[mvsa] ICE candidate error:', e.errorCode, e.errorText, e.url);
+    });
+  };
+  tryAttach();
 }
 
 function onData(msg) {
