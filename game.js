@@ -247,8 +247,10 @@ function setupConn() {
   conn.on('open', () => {
     clearTimeout(connectTimer);
     console.log('[mvsa] data channel OPEN');
-    // Announce which character we are.
-    conn.send({ t: 'hello', char: myChar });
+    // Announce which character we are — re-sent a few times so a dropped
+    // hello on the unreliable channel can't leave one side stuck waiting.
+    const hi = () => { if (conn && conn.open) conn.send({ t: 'hello', char: myChar }); };
+    hi(); setTimeout(hi, 200); setTimeout(hi, 600);
   });
   conn.on('data', onData);
   conn.on('close', onDisconnect);
@@ -287,16 +289,16 @@ function onData(msg) {
   switch (msg.t) {
     case 'hello':
       opponentChar = msg.char;
-      startGame();
+      if (!running && !gameOver) startGame();   // ignore duplicate hellos
       break;
-    case 'paddle':               // host receives guest paddle position
-      if (isHost) { guestPaddle.tx = msg.x; guestPaddle.ty = msg.y; }
+    case 'h':                    // host frame (guest receives): paddle + score/cd + puck-if-host-owns
+      if (!isHost) applyHostFrame(msg);
       break;
-    case 'state':                // guest receives authoritative snapshot
-      if (!isHost) applyState(msg);
+    case 'g':                    // guest frame (host receives): paddle + puck (+ conceded-goal) if guest owns
+      if (isHost) applyGuestFrame(msg);
       break;
     case 'over':
-      if (!isHost) endGame(msg.iWon);
+      endGame(msg.win);          // 'h' | 'g'
       break;
   }
 }
@@ -321,6 +323,20 @@ let running = false;
 let gameOver = false;
 let lastSend = 0;
 let countdown = 0;     // frames of "get ready" freeze after a goal / start
+let awaitingReset = false;   // guest: paused after conceding, until host resets
+let pendingConcede = null;   // guest: scorer of a conceded goal, re-sent every frame
+
+// --- Puck ownership -------------------------------------------------------
+// Whoever's half the puck is in SIMULATES it locally, so your own paddle hits
+// register instantly with no network round-trip — the lag only ever applies to
+// the puck travelling across the centre toward you (which you have time to
+// react to). Host defends the bottom (y >= H/2), guest the top. The exact
+// centre belongs to the host, which also drives the countdown, the serve, and
+// the authoritative score.
+function puckOwner() { return puck.y >= H / 2 ? 'h' : 'g'; }
+function iOwnPuck()  { return puckOwner() === (isHost ? 'h' : 'g'); }
+function myPaddle()  { return isHost ? hostPaddle : guestPaddle; }
+function oppPaddle() { return isHost ? guestPaddle : hostPaddle; }
 
 // Character mapping to screen sides. Each player always sees themselves
 // at the BOTTOM. So "me" = bottom, "opponent" = top, regardless of role.
@@ -338,12 +354,13 @@ function startGame() {
   $('name-bottom').textContent = 'You';
   $('name-top').textContent = CHARS[oppCharKey()]?.name || 'Opponent';
 
-  resetPuck(Math.random() < 0.5 ? 1 : -1);
+  puck.x = W / 2; puck.y = H / 2; puck.vx = 0; puck.vy = 0;
+  awaitingReset = false;
   score = { host: 0, guest: 0 };
   updateScoreHud();
   gameOver = false;
   running = true;
-  countdown = 90;               // ~1.5s ready pause
+  countdown = 90;               // ~1.5s ready pause (host drives it)
   hideOverlay();
   requestAnimationFrame(loop);
 }
@@ -396,48 +413,68 @@ function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 // ===================================================================
 function loop(now) {
   if (!running) return;
-  if (isHost) hostStep(now);
-  else        guestStep(now);
+  step(now);
   render();
   requestAnimationFrame(loop);
 }
 
-// -------- HOST: authoritative simulation --------
-function hostStep(now) {
-  movePaddle(hostPaddle, 1);      // my paddle — track input directly (no lag)
-  movePaddle(guestPaddle, 0.5);   // opponent — smooth the networked target
+function step(now) {
+  // My paddle tracks my input exactly; the opponent's eases toward the last
+  // position we received over the network (hides packet jitter).
+  movePaddle(myPaddle(), 1);
+  movePaddle(oppPaddle(), 0.5);
+
+  const iOwn = iOwnPuck();
 
   if (countdown > 0) {
-    countdown--;
-    puck.x = W / 2; puck.y = H / 2;
-  } else {
+    // Only the host runs the countdown and holds the puck at centre; the guest
+    // shows the countdown/puck it receives in host frames.
+    if (isHost) {
+      countdown--;
+      puck.x = W / 2; puck.y = H / 2; puck.vx = 0; puck.vy = 0;
+      if (countdown === 0) serve();
+    }
+  } else if (iOwn && !awaitingReset) {
+    // I own the puck: full local simulation, including my instant paddle hit.
     stepPuck();
     collidePaddle(hostPaddle);
     collidePaddle(guestPaddle);
     checkGoals();
+  } else if (!iOwn) {
+    // Opponent owns it: dead-reckon between their updates so it glides smoothly.
+    puck.x += puck.vx;
+    puck.y += puck.vy;
   }
 
-  // Broadcast snapshot (rate-limited a touch to be kind to the channel).
   if (conn && conn.open && now - lastSend > NET_RATE) {
     lastSend = now;
-    conn.send({
-      t: 'state',
-      px: puck.x, py: puck.y,
-      hx: hostPaddle.x, hy: hostPaddle.y,
-      gx: guestPaddle.x, gy: guestPaddle.y,
-      sh: score.host, sg: score.guest,
-      cd: countdown,
-    });
+    sendFrame(iOwn);
   }
 }
 
-// -------- GUEST: send paddle, wait for snapshots --------
-function guestStep(now) {
-  movePaddle(guestPaddle, 1);   // my paddle — track input directly (no lag)
-  if (conn && conn.open && now - lastSend > NET_RATE) {
-    lastSend = now;
-    conn.send({ t: 'paddle', x: guestPaddle.tx, y: guestPaddle.ty });
+// Send my per-frame state. Both sides always send their paddle; the current
+// puck owner also sends the authoritative puck. The host additionally carries
+// the authoritative score + countdown.
+function sendFrame(iOwn) {
+  const mp = myPaddle();
+  const puckData = iOwn ? { x: puck.x, y: puck.y, vx: puck.vx, vy: puck.vy } : null;
+  if (isHost) {
+    conn.send({ t: 'h', px: mp.tx, py: mp.ty, puck: puckData,
+                cd: countdown, sh: score.host, sg: score.guest });
+  } else {
+    const f = { t: 'g', px: mp.tx, py: mp.ty, puck: puckData };
+    // Re-send the conceded goal every frame until the host resets — survives
+    // packet loss on the unreliable channel without a one-shot deadlock.
+    if (awaitingReset && pendingConcede) f.gc = pendingConcede;
+    conn.send(f);
   }
+}
+
+// Host serves the puck from the centre once the countdown ends.
+function serve() {
+  puck.x = W / 2; puck.y = H / 2;
+  puck.vy = 6 * (Math.random() < 0.5 ? 1 : -1);
+  puck.vx = (Math.random() - 0.5) * 6;
 }
 
 // Move a paddle toward its target and remember previous pos for velocity.
@@ -496,53 +533,68 @@ function collidePaddle(pad) {
   if (sp > MAX_SPEED) { puck.vx *= MAX_SPEED / sp; puck.vy *= MAX_SPEED / sp; }
 }
 
+// Runs only on the puck owner. A goal at a given end can only happen while
+// that end's defender owns the puck, so exactly one side ever detects it.
 function checkGoals() {
   const inGoalX = puck.x > (W - GOAL_W) / 2 && puck.x < (W + GOAL_W) / 2;
   if (!inGoalX) return;
-  if (puck.y < -PUCK_R)      { score.host  += 1; afterGoal(-1); }  // top goal -> host scores
-  else if (puck.y > H + PUCK_R) { score.guest += 1; afterGoal(1); } // bottom goal -> guest scores
+  if (puck.y < -PUCK_R)          concede('h');   // top goal breached -> host scores
+  else if (puck.y > H + PUCK_R)  concede('g');   // bottom goal breached -> guest scores
 }
 
-function afterGoal(dir) {
+// The owner concedes a goal. Freeze the puck so it can't be detected twice.
+function concede(scorer) {
+  puck.vx = 0; puck.vy = 0;
+  if (isHost) {
+    hostRegisterGoal(scorer);          // host is the score authority
+  } else {
+    awaitingReset = true;              // stop simulating until the host resets
+    pendingConcede = scorer;           // re-sent in every guest frame (loss-proof)
+  }
+}
+
+// Host-only: apply a goal to the authoritative score and set up the next serve.
+function hostRegisterGoal(scorer) {
+  if (scorer === 'h') score.host += 1; else score.guest += 1;
   updateScoreHud();
   if (score.host >= WIN_SCORE || score.guest >= WIN_SCORE) {
-    // Announce winner. iWon is from the GUEST's perspective for the message.
-    const hostWon = score.host >= WIN_SCORE;
-    if (conn && conn.open) conn.send({ t: 'over', iWon: !hostWon });
-    endGame(hostWon);      // host perspective
+    const win = score.host >= WIN_SCORE ? 'h' : 'g';
+    // Send a few times: the loop stops on endGame so this won't be repeated.
+    const tell = () => { if (conn && conn.open) conn.send({ t: 'over', win }); };
+    tell(); setTimeout(tell, 150); setTimeout(tell, 400);
+    endGame(win);
     return;
   }
-  resetPuck(dir);
-  countdown = 75;
+  countdown = 75;                      // host owns the centre and will re-serve
+  puck.x = W / 2; puck.y = H / 2; puck.vx = 0; puck.vy = 0;
 }
 
-function resetPuck(dir) {
-  puck.x = W / 2;
-  puck.y = H / 2;
-  puck.vx = 0;
-  puck.vy = 0;   // stays put during the countdown; served on release below
-  // Give it a gentle serve toward `dir` once countdown ends via a nudge.
-  puck._serve = dir;
-}
-
-// When countdown hits zero on the host, serve the puck.
-function maybeServe() {
-  if (countdown === 0 && puck.vx === 0 && puck.vy === 0 && puck._serve) {
-    puck.vy = 6 * puck._serve;
-    puck.vx = (Math.random() - 0.5) * 6;
-    puck._serve = 0;
+// GUEST applies a host frame: opponent paddle, authoritative score/countdown,
+// and the puck when the host owns it.
+function applyHostFrame(m) {
+  hostPaddle.tx = m.px; hostPaddle.ty = m.py;   // opponent paddle target (eased)
+  score.host = m.sh; score.guest = m.sg;
+  countdown = m.cd;
+  if (m.cd > 0) awaitingReset = false;          // host has reset after a goal
+  updateScoreHud();
+  if (m.puck) {                                 // host owns -> authoritative puck
+    puck.x = m.puck.x; puck.y = m.puck.y; puck.vx = m.puck.vx; puck.vy = m.puck.vy;
+  }
+  // Fallback in case the one-shot 'over' message was lost.
+  if (!gameOver && (score.host >= WIN_SCORE || score.guest >= WIN_SCORE)) {
+    endGame(score.host >= WIN_SCORE ? 'h' : 'g');
   }
 }
 
-// -------- GUEST: apply a snapshot --------
-function applyState(m) {
-  puck.x = m.px; puck.y = m.py;
-  hostPaddle.x = m.hx; hostPaddle.y = m.hy;   // opponent paddle: trust host
-  // Our own paddle (guestPaddle) is driven locally in guestStep() for zero
-  // input lag; we deliberately do NOT overwrite it from the snapshot.
-  score.host = m.sh; score.guest = m.sg;
-  countdown = m.cd;
-  updateScoreHud();
+// HOST applies a guest frame: opponent paddle, the puck when the guest owns it,
+// and a conceded-goal flag (gc) the guest re-sends until we reset.
+function applyGuestFrame(m) {
+  guestPaddle.tx = m.px; guestPaddle.ty = m.py;
+  if (countdown > 0 || gameOver) return;        // host owns the puck during countdown
+  if (m.gc) { hostRegisterGoal(m.gc); return; } // register once; countdown>0 blocks repeats
+  if (m.puck) {                                 // guest owns -> authoritative puck
+    puck.x = m.puck.x; puck.y = m.puck.y; puck.vx = m.puck.vx; puck.vy = m.puck.vy;
+  }
 }
 
 // ===================================================================
@@ -557,10 +609,11 @@ function updateScoreHud() {
   $('score-top').textContent = oppScore();
 }
 
-function endGame(hostWon) {
+function endGame(win) {          // win is the winning side: 'h' or 'g'
+  if (gameOver) return;         // idempotent — 'over' may arrive several times
   gameOver = true;
   running = false;
-  const iWon = isHost ? hostWon : !hostWon;
+  const iWon = win === (isHost ? 'h' : 'g');
   showOverlay((iWon ? '🏆 You win!' : '😢 You lose') +
     '<br><small>' + myScore() + ' – ' + oppScore() + '</small>' +
     '<br><button class="big-btn" style="margin-top:16px;max-width:200px" onclick="location.reload()">Play again</button>');
@@ -578,8 +631,6 @@ function resizeCanvas() {
 }
 
 function render() {
-  if (isHost) maybeServe();
-
   ctx.clearRect(0, 0, W, H);
 
   // Guest sees the board rotated 180°.
