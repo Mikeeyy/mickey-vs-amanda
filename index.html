@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>Mickey vs Amanda — Air Hockey</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ============ MENU ============ -->
+  <div id="menu" class="screen">
+    <h1 class="title">🏒 Air Hockey</h1>
+    <p class="subtitle">Mickey&nbsp;vs&nbsp;Amanda</p>
+
+    <div class="card">
+      <p class="label">1. Pick your player</p>
+      <div class="char-pick">
+        <button class="char" data-char="mickey">
+          <img src="assets/mickey.png" alt="Mickey" onerror="this.style.display='none'" />
+          <span>Mickey</span>
+        </button>
+        <button class="char" data-char="amanda">
+          <img src="assets/amanda.png" alt="Amanda" onerror="this.style.display='none'" />
+          <span>Amanda</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="card">
+      <p class="label">2. Play together</p>
+      <button id="btn-create" class="big-btn" disabled>Create a game</button>
+      <div class="divider">or</div>
+      <div class="join-row">
+        <input id="join-code" maxlength="4" placeholder="CODE" autocomplete="off" />
+        <button id="btn-join" class="big-btn" disabled>Join</button>
+      </div>
+    </div>
+
+    <p id="menu-status" class="status"></p>
+  </div>
+
+  <!-- ============ LOBBY (host waiting) ============ -->
+  <div id="lobby" class="screen hidden">
+    <h2>Share this code</h2>
+    <div id="room-code" class="room-code">····</div>
+    <p class="hint">Tell the other player to enter this code and press <b>Join</b>.</p>
+    <div class="spinner"></div>
+    <p class="status">Waiting for the other player…</p>
+    <button class="link-btn" onclick="location.reload()">Cancel</button>
+  </div>
+
+  <!-- ============ GAME ============ -->
+  <div id="game" class="screen hidden">
+    <div id="hud">
+      <div class="hud-side" id="hud-top">
+        <img class="hud-avatar" id="avatar-top" alt="" />
+        <span class="hud-name" id="name-top">—</span>
+        <span class="hud-score" id="score-top">0</span>
+      </div>
+      <div class="hud-vs">vs</div>
+      <div class="hud-side" id="hud-bottom">
+        <span class="hud-score" id="score-bottom">0</span>
+        <span class="hud-name" id="name-bottom">You</span>
+        <img class="hud-avatar" id="avatar-bottom" alt="" />
+      </div>
+    </div>
+    <div id="stage">
+      <canvas id="board"></canvas>
+      <div id="overlay" class="overlay hidden"><span id="overlay-text"></span></div>
+    </div>
+  </div>
+
+  <!-- PeerJS: free public WebRTC signaling broker (no backend needed) -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
