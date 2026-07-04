@@ -22,17 +22,25 @@ guest sends only its paddle position and sees the board rotated 180°, so
 > rock-solid uptime you can run your own PeerServer, but for casual play the
 > public one is fine.
 
-## Add the avatars
+## Roster & avatars
 
-Drop two square PNGs into `assets/`:
+Players pick from a roster of avatars: **Maju, Miki, Amanda, Capibara,
+Goliat, Olaf**. Their photos live in `assets/` as 512×512 PNGs.
 
-```
-assets/mickey.png
-assets/amanda.png
-```
+To **add a new avatar**: drop a square `assets/<key>.png`, then add `<key>`
+to the `ROSTER` array and a matching entry in the `CHARS` object in
+`game.js` (name + colour). The picker builds itself from that list. If an
+image is missing, the paddle falls back to a coloured disc with the
+character's initial — nothing breaks.
 
-Until they exist, each paddle shows a coloured disc with the character's
-initial — the game works either way.
+## Multiplayer across networks
+
+WebRTC needs a **TURN relay** to connect two devices on different networks
+(mobile data vs. home Wi-Fi, firewalls, symmetric NATs). This game ships
+with public STUN + TURN servers configured in `PEER_CONFIG` (`game.js`), so
+cross-device play works on GitHub Pages. The public TURN servers are
+best-effort; for guaranteed uptime, plug in your own (e.g. a Metered or
+Twilio TURN credential) in that config block.
 
 ## Run locally
 

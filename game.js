@@ -47,9 +47,16 @@ const ctx = canvas.getContext('2d');
 // ===================================================================
 //  Character avatars
 // ===================================================================
+// Display order of the roster. Add a new avatar by dropping <key>.png into
+// assets/ and adding a line here — the picker builds itself from this list.
+const ROSTER = ['maju', 'miki', 'amanda', 'capibara', 'goliat', 'olaf'];
 const CHARS = {
-  mickey: { name: 'Mickey', color: '#4ea1ff', src: 'assets/mickey.png' },
-  amanda: { name: 'Amanda', color: '#ff6b9d', src: 'assets/amanda.png' },
+  maju:     { name: 'Maju',     color: '#ff6b9d', src: 'assets/maju.png' },
+  miki:     { name: 'Miki',     color: '#4ea1ff', src: 'assets/miki.png' },
+  amanda:   { name: 'Amanda',   color: '#e0556b', src: 'assets/amanda.png' },
+  capibara: { name: 'Capibara', color: '#c98a5e', src: 'assets/capibara.png' },
+  goliat:   { name: 'Goliat',   color: '#8a7bd8', src: 'assets/goliat.png' },
+  olaf:     { name: 'Olaf',     color: '#5ec8e0', src: 'assets/olaf.png' },
 };
 
 // Preload avatar images; keep a "loaded" flag so we can fall back to a
@@ -69,14 +76,27 @@ for (const key in CHARS) {
 // ===================================================================
 let myChar = null;
 
-document.querySelectorAll('.char').forEach((btn) => {
+// Build one picker button per roster entry.
+const charList = $('char-list');
+ROSTER.forEach((key) => {
+  const c = CHARS[key];
+  const btn = document.createElement('button');
+  btn.className = 'char';
+  btn.dataset.char = key;
+  btn.innerHTML =
+    '<img src="' + c.src + '" alt="' + c.name + '" ' +
+    'onerror="this.replaceWith(Object.assign(document.createElement(\'div\'),' +
+    '{className:\'char-fallback\',textContent:\'' + c.name[0] + '\',' +
+    'style:\'background:' + c.color + '\'}))" />' +
+    '<span>' + c.name + '</span>';
   btn.addEventListener('click', () => {
-    document.querySelectorAll('.char').forEach((b) => b.classList.remove('selected'));
+    charList.querySelectorAll('.char').forEach((b) => b.classList.remove('selected'));
     btn.classList.add('selected');
-    myChar = btn.dataset.char;
+    myChar = key;
     $('btn-create').disabled = false;
     refreshJoinBtn();
   });
+  charList.appendChild(btn);
 });
 
 const joinInput = $('join-code');
@@ -101,10 +121,30 @@ function menuStatus(msg, isError) {
 //  Networking (PeerJS)
 // ===================================================================
 const CODE_PREFIX = 'mvsa-';     // namespace on the shared public broker
+
+// ICE servers for WebRTC. STUN alone works when both players are on the
+// same LAN / permissive networks, but two devices on different networks
+// (mobile data vs. home Wi-Fi, corporate firewalls, symmetric NATs) usually
+// need a TURN relay to connect at all — that's why localhost worked but
+// cross-device on Pages hung at "waiting". These public TURN servers relay
+// the traffic when a direct P2P link can't be punched through.
+const PEER_CONFIG = {
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'turn:openrelay.metered.ca:80',                 username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443',                username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443?transport=tcp',  username: 'openrelayproject', credential: 'openrelayproject' },
+    ],
+  },
+};
+
 let peer = null;
 let conn = null;
 let isHost = false;
 let opponentChar = null;
+let connectTimer = null;    // guest-side "couldn't connect" watchdog
 
 function randomCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no ambiguous I/O/0/1
@@ -119,7 +159,7 @@ function createGame() {
   $('btn-create').disabled = true;
   menuStatus('Connecting to game network…');
 
-  peer = new Peer(CODE_PREFIX + code);
+  peer = new Peer(CODE_PREFIX + code, PEER_CONFIG);
 
   peer.on('open', () => {
     $('room-code').textContent = code;
@@ -149,7 +189,15 @@ function joinGame() {
   $('btn-join').disabled = true;
   menuStatus('Connecting…');
 
-  peer = new Peer();
+  // Watchdog: if we can't establish the link (bad code, or a network even
+  // TURN can't traverse), tell the user instead of spinning forever.
+  connectTimer = setTimeout(() => {
+    menuStatus('Could not reach the other player. Check the code, make sure they created the game, then try again.', true);
+    $('btn-join').disabled = false;
+    if (peer) peer.destroy();
+  }, 20000);
+
+  peer = new Peer(PEER_CONFIG);
   peer.on('open', () => {
     conn = peer.connect(CODE_PREFIX + code, { reliable: false });
     setupConn();
@@ -163,6 +211,7 @@ function joinGame() {
 // Common connection setup for both roles.
 function setupConn() {
   conn.on('open', () => {
+    clearTimeout(connectTimer);
     // Announce which character we are.
     conn.send({ t: 'hello', char: myChar });
   });
@@ -446,7 +495,7 @@ function endGame(hostWon) {
   running = false;
   const iWon = isHost ? hostWon : !hostWon;
   showOverlay((iWon ? '🏆 You win!' : '😢 You lose') +
-    '<br><small>' + score.host + ' – ' + score.guest + '</small>' +
+    '<br><small>' + myScore() + ' – ' + oppScore() + '</small>' +
     '<br><button class="big-btn" style="margin-top:16px;max-width:200px" onclick="location.reload()">Play again</button>');
 }
 
@@ -555,11 +604,42 @@ function drawPuck() {
 
 function drawCountdown() {
   const n = Math.ceil(countdown / 30);
-  ctx.fillStyle = 'rgba(255,255,255,.9)';
-  ctx.font = 'bold 90px sans-serif';
+  const cx = W / 2;
+  const afterGoal = (score.host + score.guest) > 0;   // 0-0 == opening serve
+
+  ctx.save();
   ctx.textAlign = 'center';
+
+  if (afterGoal) {
+    // "GOAL!" banner + the current score in each player's colour.
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffd94e';
+    ctx.font = 'bold 46px sans-serif';
+    ctx.fillText('GOAL!', cx, H / 2 - 150);
+
+    const myC  = CHARS[myChar]       || { color: '#fff', name: 'You' };
+    const oppC = CHARS[opponentChar] || { color: '#fff', name: 'Them' };
+    ctx.font = 'bold 78px sans-serif';
+    ctx.fillStyle = myC.color;
+    ctx.fillText(String(myScore()), cx - 82, H / 2 - 60);
+    ctx.fillStyle = oppC.color;
+    ctx.fillText(String(oppScore()), cx + 82, H / 2 - 60);
+    ctx.fillStyle = 'rgba(255,255,255,.85)';
+    ctx.font = 'bold 44px sans-serif';
+    ctx.fillText('–', cx, H / 2 - 60);
+
+    ctx.fillStyle = 'rgba(255,255,255,.7)';
+    ctx.font = '600 20px sans-serif';
+    ctx.fillText('You', cx - 82, H / 2 - 10);
+    ctx.fillText(oppC.name, cx + 82, H / 2 - 10);
+  }
+
+  // Ready countdown number.
+  ctx.fillStyle = 'rgba(255,255,255,.95)';
+  ctx.font = 'bold 90px sans-serif';
   ctx.textBaseline = 'middle';
-  ctx.fillText(n > 0 ? n : 'GO', W / 2, H / 2);
+  ctx.fillText(n > 0 ? String(n) : 'GO', cx, afterGoal ? H / 2 + 90 : H / 2);
+  ctx.restore();
 }
 
 // ===================================================================

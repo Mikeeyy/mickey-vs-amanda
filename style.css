@@ -44,14 +44,20 @@ html, body {
 }
 .label { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
 
-/* character picker */
-.char-pick { display: flex; gap: 12px; }
+/* character picker — grid that scrolls if the roster grows */
+.char-pick {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 2px;
+}
 .char {
-  flex: 1;
   background: #131b2b;
   border: 2px solid #2a3550;
   border-radius: 14px;
-  padding: 14px 8px;
+  padding: 12px 6px;
   color: var(--text);
   cursor: pointer;
   display: flex;
@@ -62,8 +68,18 @@ html, body {
 }
 .char:active { transform: scale(.97); }
 .char.selected { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(78,161,255,.2); }
-.char img { width: 64px; height: 64px; border-radius: 50%; object-fit: cover; background: #223; }
-.char span { font-weight: 600; }
+.char img,
+.char .char-fallback {
+  width: 60px; height: 60px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #223;
+}
+.char .char-fallback {
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 1.5rem; color: #fff;
+}
+.char span { font-weight: 600; font-size: .9rem; }
 
 /* buttons */
 .big-btn {
@@ -82,20 +98,27 @@ html, body {
 .big-btn:disabled { opacity: .4; cursor: not-allowed; }
 
 .divider { text-align: center; color: var(--muted); margin: 12px 0; font-size: .85rem; }
-.join-row { display: flex; gap: 8px; }
+.join-row { display: flex; gap: 8px; align-items: stretch; }
 #join-code {
-  flex: 1;
-  padding: 14px;
-  font-size: 1.2rem;
+  flex: 1 1 auto;
+  min-width: 0;               /* let the input shrink so the button stays visible on mobile */
+  width: 0;
+  padding: 14px 10px;
+  font-size: 1.1rem;
   text-align: center;
   text-transform: uppercase;
-  letter-spacing: 4px;
+  letter-spacing: 3px;
   border-radius: 12px;
   border: 2px solid #2a3550;
   background: #131b2b;
   color: var(--text);
 }
-.join-row .big-btn { width: auto; padding: 14px 22px; }
+.join-row .big-btn {
+  flex: 0 0 auto;             /* never shrink or overflow */
+  width: auto;
+  padding: 14px 20px;
+  white-space: nowrap;
+}
 
 .status { color: var(--muted); min-height: 1.2em; text-align: center; }
 .status.error { color: var(--accent2); }
