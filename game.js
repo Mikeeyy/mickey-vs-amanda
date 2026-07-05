@@ -27,7 +27,7 @@ const H = 800;
 const PUCK_R    = 16;
 const PADDLE_R  = 34;
 const GOAL_W    = 190;          // width of the goal opening
-const FRICTION  = 0.995;
+const FRICTION  = 0.999;         // near-frictionless glide (air hockey)
 const MAX_SPEED = 22;
 const WIN_SCORE = 7;
 const NET_RATE  = 1000 / 60;    // guest -> host paddle send interval (ms)
@@ -325,6 +325,7 @@ let lastSend = 0;
 let countdown = 0;     // frames of "get ready" freeze after a goal / start
 let awaitingReset = false;   // guest: paused after conceding, until host resets
 let pendingConcede = null;   // guest: scorer of a conceded goal, re-sent every frame
+let lostFrames = 0;          // host: consecutive frames the puck has been off-board
 
 // --- Puck ownership -------------------------------------------------------
 // Whoever's half the puck is in SIMULATES it locally, so your own paddle hits
@@ -441,9 +442,21 @@ function step(now) {
     collidePaddle(guestPaddle);
     checkGoals();
   } else if (!iOwn) {
-    // Opponent owns it: dead-reckon between their updates so it glides smoothly.
-    puck.x += puck.vx;
-    puck.y += puck.vy;
+    // Opponent owns it: run the SAME step (friction + wall bounce) so the puck
+    // glides identically and stays on-board between their updates.
+    stepPuck();
+  }
+
+  // Safety net (host only): if the puck is ever stuck well off the board for a
+  // sustained stretch — e.g. a hand-off lost during a no-owner window — recover
+  // it to the centre so the game never becomes unplayable.
+  if (isHost && countdown === 0) {
+    if (puckLost()) lostFrames++; else lostFrames = 0;
+    if (lostFrames > 60) {
+      lostFrames = 0;
+      countdown = 60;
+      puck.x = W / 2; puck.y = H / 2; puck.vx = 0; puck.vy = 0;
+    }
   }
 
   if (conn && conn.open && now - lastSend > NET_RATE) {
@@ -488,20 +501,33 @@ function movePaddle(pad, smooth) {
   pad.y += (pad.ty - pad.y) * smooth;
 }
 
+// Bounce the puck off the side/top/bottom walls (never across a goal opening).
+function bounceWalls() {
+  if (puck.x < PUCK_R)      { puck.x = PUCK_R;      puck.vx =  Math.abs(puck.vx); }
+  if (puck.x > W - PUCK_R)  { puck.x = W - PUCK_R;  puck.vx = -Math.abs(puck.vx); }
+  const inGoalX = puck.x > (W - GOAL_W) / 2 && puck.x < (W + GOAL_W) / 2;
+  if (puck.y < PUCK_R && !inGoalX)     { puck.y = PUCK_R;     puck.vy =  Math.abs(puck.vy); }
+  if (puck.y > H - PUCK_R && !inGoalX) { puck.y = H - PUCK_R; puck.vy = -Math.abs(puck.vy); }
+}
+
+// One physics step: move, apply friction, bounce off walls. Run by BOTH the
+// owner (who additionally does paddle collisions + goal checks) and the
+// non-owner (dead-reckoning between updates). Because it's the SAME step on
+// both screens, the puck keeps the same speed across the centre line and can
+// never leave the board.
 function stepPuck() {
   puck.x += puck.vx;
   puck.y += puck.vy;
   puck.vx *= FRICTION;
   puck.vy *= FRICTION;
+  bounceWalls();
+}
 
-  // Side walls.
-  if (puck.x < PUCK_R)      { puck.x = PUCK_R;      puck.vx = Math.abs(puck.vx); }
-  if (puck.x > W - PUCK_R)  { puck.x = W - PUCK_R;  puck.vx = -Math.abs(puck.vx); }
-
-  // Top / bottom walls — but not across the goal opening.
-  const inGoalX = puck.x > (W - GOAL_W) / 2 && puck.x < (W + GOAL_W) / 2;
-  if (puck.y < PUCK_R && !inGoalX)     { puck.y = PUCK_R;     puck.vy = Math.abs(puck.vy); }
-  if (puck.y > H - PUCK_R && !inGoalX) { puck.y = H - PUCK_R; puck.vy = -Math.abs(puck.vy); }
+// True when the puck sits well outside the board — beyond any goal depth — so
+// a normal goal (which resets within a second) never trips the watchdog.
+function puckLost() {
+  const M = 60;
+  return puck.x < -M || puck.x > W + M || puck.y < -M || puck.y > H + M;
 }
 
 function collidePaddle(pad) {
