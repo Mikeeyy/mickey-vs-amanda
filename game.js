@@ -603,7 +603,10 @@ function applyHostFrame(m) {
   countdown = m.cd;
   if (m.cd > 0) awaitingReset = false;          // host has reset after a goal
   updateScoreHud();
-  if (m.puck) {                                 // host owns -> authoritative puck
+  // Accept the puck ONLY when I'm not the one simulating it. If I currently own
+  // it (my half), I'm the authority — ignoring the incoming copy prevents the
+  // two sides from swapping positions and teleporting the ball near centre.
+  if (m.puck && (!iOwnPuck() || countdown > 0)) {
     puck.x = m.puck.x; puck.y = m.puck.y; puck.vx = m.puck.vx; puck.vy = m.puck.vy;
   }
   // Fallback in case the one-shot 'over' message was lost.
@@ -618,7 +621,9 @@ function applyGuestFrame(m) {
   guestPaddle.tx = m.px; guestPaddle.ty = m.py;
   if (countdown > 0 || gameOver) return;        // host owns the puck during countdown
   if (m.gc) { hostRegisterGoal(m.gc); return; } // register once; countdown>0 blocks repeats
-  if (m.puck) {                                 // guest owns -> authoritative puck
+  // Accept the puck ONLY when I'm not simulating it myself (guest's half),
+  // otherwise the two sides swap positions and the ball teleports near centre.
+  if (m.puck && !iOwnPuck()) {
     puck.x = m.puck.x; puck.y = m.puck.y; puck.vx = m.puck.vx; puck.vy = m.puck.vy;
   }
 }
